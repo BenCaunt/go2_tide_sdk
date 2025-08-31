@@ -30,16 +30,15 @@ class Go2SensorsNode(BaseNode):
         self._last_img: Optional[Dict[str, Any]] = None
         self._last_pc: Optional[Dict[str, Any]] = None
 
-        # Rerun setup
-        try:
-            rr.init(self.rerun_app_id, spawn=self.rerun_spawn)
-            try:
-                rr.log("world", rr.ViewCoordinates.RDF)
-            except TypeError:
-                pass
-        except Exception:
-            pass
+        # Point cloud coloring
+        # Modes: 'auto' (use RGB if provided, else fallback),
+        #        'height' (by z), 'distance' (by Euclidean distance),
+        #        'rgb' (only use provided RGB), 'none' (no colors)
+        self.pc_color_mode = str(p.get("pc_color_mode", "height")).lower()
 
+        # Rerun setup
+        rr.init(self.rerun_app_id, spawn=self.rerun_spawn)
+        rr.log("world", rr.ViewCoordinates.RDF)
         # Subscribe to topics from go2_tide_bridge
         self.subscribe("sensor/camera/front/image", self._on_image)
         self.subscribe("sensor/lidar/points3d", self._on_points)
@@ -72,7 +71,67 @@ class Go2SensorsNode(BaseNode):
             if count <= 0 or not isinstance(xyz, (bytes, bytearray)):
                 return
             pts = np.frombuffer(xyz, dtype=np.float32).reshape((-1, 3))
-            rr.log("/lidar/points", rr.Points3D(pts))
+
+            colors = None
+
+            # Try to use provided RGB if available and mode allows
+            rgb_bytes = pc_msg.get("rgb")
+            if (
+                self.pc_color_mode in ("auto", "rgb")
+                and isinstance(rgb_bytes, (bytes, bytearray))
+                and len(rgb_bytes) >= count * 3
+            ):
+                colors = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape((-1, 3))
+
+            # If no colors yet, compute by height or distance depending on mode
+            if colors is None and self.pc_color_mode in ("auto", "height", "distance"):
+                if self.pc_color_mode in ("auto", "height"):
+                    scalars = pts[:, 2]  # z height
+                else:
+                    scalars = np.linalg.norm(pts, axis=1)  # distance
+
+                # Normalize scalars to [0,1] with simple min-max; handle degenerate case
+                s_min = float(np.nanmin(scalars))
+                s_max = float(np.nanmax(scalars))
+                if not np.isfinite(s_min) or not np.isfinite(s_max) or s_max <= s_min:
+                    norm = np.zeros_like(scalars, dtype=np.float32)
+                else:
+                    norm = ((scalars - s_min) / (s_max - s_min)).astype(np.float32)
+
+                # Map to a simple blue->cyan->yellow->red gradient
+                # This avoids external colormap deps and works with uint8 RGB
+                t = norm.clip(0.0, 1.0)
+                # Piecewise: 0..0.33 blue->cyan, 0.33..0.66 cyan->yellow, 0.66..1 yellow->red
+                c = np.empty((t.shape[0], 3), dtype=np.float32)
+                # segment 1
+                m1 = t < 1/3
+                k1 = np.zeros_like(t)
+                k1[m1] = t[m1] * 3.0
+                c[m1, 0] = 0.0
+                c[m1, 1] = k1[m1]
+                c[m1, 2] = 1.0
+                # segment 2
+                m2 = (t >= 1/3) & (t < 2/3)
+                k2 = np.zeros_like(t)
+                k2[m2] = (t[m2] - 1/3) * 3.0
+                c[m2, 0] = k2[m2]
+                c[m2, 1] = 1.0
+                c[m2, 2] = 1.0 - k2[m2]
+                # segment 3
+                m3 = t >= 2/3
+                k3 = np.zeros_like(t)
+                k3[m3] = (t[m3] - 2/3) * 3.0
+                c[m3, 0] = 1.0
+                c[m3, 1] = 1.0 - k3[m3]
+                c[m3, 2] = 0.0
+
+                colors = (c * 255.0).astype(np.uint8)
+
+            # If still no colors (mode 'none' or failed), log points without colors
+            if colors is not None:
+                rr.log("/lidar/points", rr.Points3D(pts, colors=colors))
+            else:
+                rr.log("/lidar/points", rr.Points3D(pts))
         except Exception:
             pass
 

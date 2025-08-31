@@ -24,6 +24,7 @@ import numpy as np
 from tide.namespaces import robot_topic, CmdTopic, StateTopic
 from tide.models import Pose3D, Quaternion, Vector3, Twist2D
 from tide.models.serialization import to_zenoh_value, from_zenoh_value
+import cbor2
 
 # Zenoh
 try:
@@ -473,35 +474,37 @@ class Go2TideBridge:
 
     async def _publish_image(self, img_bgr: np.ndarray, ts: float):
         try:
-            from tide.models import Image, Header
             h, w, _ = img_bgr.shape
-            msg = Image(
-                header=Header(frame_id="camera/front"),
-                height=h,
-                width=w,
-                encoding="bgr8",
-                is_bigendian=False,
-                step=w * 3,
-                data=img_bgr.tobytes(),
-            )
+            payload = {
+                "header": {"frame_id": "camera/front"},
+                "height": int(h),
+                "width": int(w),
+                "encoding": "bgr8",
+                "is_bigendian": False,
+                "step": int(w * 3),
+                "data": img_bgr.tobytes(),
+            }
             if self.image_pub:
-                self.image_pub.put(to_zenoh_value(msg))
+                self.image_pub.put(cbor2.dumps(payload))
         except Exception as e:
             log.debug(f"Failed to publish image: {e}")
 
     async def _publish_points(self, pts: np.ndarray, colors: Optional[np.ndarray], ts: float):
         try:
-            if PointCloud3D is None:
-                return
             pts = pts.astype(np.float32, copy=False)
             rgb_bytes = None
             if colors is not None:
                 c = np.clip(colors, 0, 255).astype(np.uint8, copy=False)
                 if c.ndim == 2 and c.shape[1] == 3:
                     rgb_bytes = c.tobytes()
-            pc_msg = PointCloud3D(count=int(pts.shape[0]), xyz=pts.tobytes(), rgb=rgb_bytes)
+            payload = {
+                "count": int(pts.shape[0]),
+                "xyz": pts.tobytes(),
+            }
+            if rgb_bytes is not None:
+                payload["rgb"] = rgb_bytes
             if self.points_pub:
-                self.points_pub.put(to_zenoh_value(pc_msg))
+                self.points_pub.put(cbor2.dumps(payload))
         except Exception as e:
             log.debug(f"Failed to publish point cloud: {e}")
 
