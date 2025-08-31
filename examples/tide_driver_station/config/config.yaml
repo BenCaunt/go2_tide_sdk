@@ -1,0 +1,23 @@
+session:
+  mode: peer
+
+nodes:
+  - type: nodes.driver_station_node.DriverStationNode
+    params:
+      robot_id: cash
+      update_rate: 30.0
+      deadzone: 0.12
+      axes:
+        x: 0     # left stick horizontal
+        y: 1     # left stick vertical
+        yaw: 3   # right stick horizontal
+      invert:
+        x: true    # right on stick -> negative vy (strafe right)
+        y: true   # push forward -> positive forward
+        yaw: true  # right on stick -> negative yaw (turn right)
+      scales:
+        linear: 1.3   # m/s
+        angular: 3.0  # rad/s
+      # enable_button: 4   # optional: hold LB to enable movement
+
+scripts: []

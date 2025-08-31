@@ -1,0 +1,13 @@
+🕒 WebRTC connection        : 🟡 started       (17:38:45)
+Decoder set to: LibVoxelDecoder
+🕒 Signaling State          : 🟡 have-local-offer (17:38:45)
+🕒 ICE Gathering State      : 🟡 gathering     (17:38:45)
+🕒 ICE Gathering State      : 🟢 complete      (17:38:45)
+🕒 ICE Connection State     : 🔵 checking      (17:38:45)
+🕒 Peer Connection State    : 🔵 connecting    (17:38:45)
+🕒 Signaling State          : 🟢 stable        (17:38:45)
+🕒 ICE Connection State     : 🟢 completed     (17:38:46)
+🕒 Peer Connection State    : 🟢 connected     (17:38:46)
+🕒 Data Channel Verification: ✅ OK            (17:38:46)
+Go2 connection mode: STA-L
+🕒 Signaling State          : ⚫ closed        (17:38:58)
