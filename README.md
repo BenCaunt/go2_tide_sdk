@@ -1,3 +1,14 @@
+# Tide Demo
+
+This project is based on the work https://github.com/legion1581/go2_webrtc_connect by legion1581 and would not be possible without  this.  
+
+Once the rest of the project setup has been complete 
+
+
+
+
+
+
 # Full Unitree Go2 WebRTC Driver
 
 This repository contains a Python implementation of the WebRTC driver to connect to the Unitree Go2 Robot. WebRTC is used by the Unitree Go APP and provides high-level control through it. Therefore, no jailbreak or firmware manipulation is required. It works out of the box for Go2 AIR/PRO/EDU models.
@@ -63,8 +74,28 @@ cd go2_webrtc_connect
 pip install -e .
 ```
 
-## Usage 
-Example programs are located in the /example directory.
+## Tide install 
+```sh
+pip install tide-sdk
+```
+
+
+
+## Tide Usage
+```sh
+cd examples
+```
+In your first shell run `python3 go2_tide_bridge.py`
+
+Then in your second shell:
+```sh
+cd tide_driver_station
+tide up
+```
+
+
+
+
 
 ### Thanks
 
@@ -73,7 +104,7 @@ A big thank you to TheRoboVerse community! Visit us at [TheRoboVerse](https://th
 Special thanks to the [tfoldi WebRTC project](https://github.com/tfoldi/go2-webrtc) and [abizovnuralem](https://github.com/abizovnuralem) for adding LiDAR support and [MrRobotow](https://github.com/MrRobotoW) for providing a plot LiDAR example.
 
  
-### Support
+### Support (legion1581 who did the original work for this Repo)
 
 If you like this project, please consider buying me a coffee:
 
