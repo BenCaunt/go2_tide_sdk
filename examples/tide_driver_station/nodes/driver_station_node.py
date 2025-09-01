@@ -22,6 +22,7 @@ Configuration (YAML params for this node):
 import os
 import time
 from typing import Optional, Dict, Any
+import numpy as np  # kept for potential math; safe to remove if unused
 
 try:
     import pygame
@@ -58,6 +59,8 @@ class DriverStationNode(BaseNode):
         self.linear_scale = float(scl.get("linear", 0.6))
         self.angular_scale = float(scl.get("angular", 1.2))
         self.enable_button: Optional[int] = params.get("enable_button", None)
+
+        # Visualization moved to sensors node to avoid duplicate Rerun init
 
         # Joystick state
         self._js_ready = False
@@ -153,12 +156,14 @@ class DriverStationNode(BaseNode):
         twist = Twist2D(linear=Vector2(x=vx, y=vy), angular=wz)
         self.put("cmd/twist", to_zenoh_value(twist))
 
+        # Fetch latest pose + quat for periodic console logging
+        pose = self.take("state/pose3d")
+        quat = self.take("sensor/imu/quat")
+
         # Log at ~1 Hz
         now = time.time()
         if now - self._last_log > 1.0:
             self._last_log = now
-            pose = self.take("state/pose3d")
-            quat = self.take("sensor/imu/quat")
             pose_txt = "pose:N/A"
             if isinstance(pose, dict):
                 p = pose.get("position") or {}

@@ -7,6 +7,9 @@ connection from this node (single client constraint).
 
 from typing import Any, Dict, Optional
 import numpy as np
+import json
+import base64
+import math
 
 from tide.core.node import BaseNode
 import rerun as rr
@@ -29,6 +32,12 @@ class Go2SensorsNode(BaseNode):
         # Latest received messages
         self._last_img: Optional[Dict[str, Any]] = None
         self._last_pc: Optional[Dict[str, Any]] = None
+        self._last_pose: Optional[Dict[str, Any]] = None
+        self._pose_cache: Optional[Dict[str, Any]] = None
+
+        # Robot dimensions in meters (standing): 0.70 x 0.31 x 0.40
+        # Used for a simple 3D box visualization in Rerun.
+        self._robot_half_sizes = np.array([0.70 / 2.0, 0.31 / 2.0, 0.40 / 2.0], dtype=np.float32)
 
         # Point cloud coloring
         # Modes: 'auto' (use RGB if provided, else fallback),
@@ -36,18 +45,94 @@ class Go2SensorsNode(BaseNode):
         #        'rgb' (only use provided RGB), 'none' (no colors)
         self.pc_color_mode = str(p.get("pc_color_mode", "height")).lower()
 
+        # Occupancy is handled by a separate node; this viewer only logs its output.
+
         # Rerun setup
         rr.init(self.rerun_app_id, spawn=self.rerun_spawn)
         rr.log("world", rr.ViewCoordinates.RDF)
         # Subscribe to topics from go2_tide_bridge
         self.subscribe("sensor/camera/front/image", self._on_image)
         self.subscribe("sensor/lidar/points3d", self._on_points)
+        self.subscribe("state/pose3d", self._on_pose)
+        # Optional occupancy image from separate node
+        self.subscribe("mapping/occupancy/image", self._on_occ_image)
+        # Standardized occupancy grid (Tide OccupancyGrid2D) and optional pre-rendered image
+        self._last_occ_grid: Optional[Dict[str, Any]] = None
+        self._last_occ_img: Optional[np.ndarray] = None  # RGB image if provided by producer
+        self.subscribe("mapping/occupancy", self._on_occ_grid)
 
     def _on_image(self, msg: Dict[str, Any]):
         self._last_img = msg
 
     def _on_points(self, msg: Dict[str, Any]):
         self._last_pc = msg
+
+    def _on_pose(self, msg: Dict[str, Any]):
+        self._last_pose = msg
+        self._pose_cache = msg
+
+    def _on_occ_image(self, msg: Any):
+        # Cache a pre-rendered occupancy image; log later in step to avoid competing draws
+        try:
+            if isinstance(msg, (bytes, bytearray)):
+                payload = json.loads(msg)
+            elif isinstance(msg, str):
+                payload = json.loads(msg)
+            elif isinstance(msg, dict):
+                payload = msg
+            else:
+                return
+
+            h = int(payload.get("height", 0))
+            w = int(payload.get("width", 0))
+            enc = str(payload.get("encoding", "rgb8")).lower()
+            fmt = str(payload.get("format", "")).lower()
+            data = payload.get("data")
+            raw = b""
+            if fmt == "json_b64":
+                b64 = payload.get("data_b64", "")
+                if isinstance(b64, str) and b64:
+                    raw = base64.b64decode(b64)
+            elif isinstance(data, (bytes, bytearray)):
+                raw = data
+            elif isinstance(data, str):
+                raw = base64.b64decode(data)
+            if h <= 0 or w <= 0 or len(raw) < h * w * 3:
+                return
+            img = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 3))
+            if enc == "bgr8":
+                img = img[:, :, ::-1]
+            self._last_occ_img = img
+        except Exception:
+            pass
+
+    def _on_occ_grid(self, msg: Dict[str, Any]):
+        # Accept dict directly, or attempt to decode bytes (CBOR/JSON) into dict
+        try:
+            if isinstance(msg, dict) and "width" in msg and "height" in msg and "data" in msg:
+                self._last_occ_grid = msg
+                return
+            if isinstance(msg, (bytes, bytearray)):
+                dec = None
+                # Try CBOR first
+                try:
+                    import cbor2  # type: ignore
+
+                    dec = cbor2.loads(msg)
+                except Exception:
+                    dec = None
+                # Fallback to JSON
+                if dec is None:
+                    try:
+                        import json as _json
+
+                        dec = _json.loads(msg)
+                    except Exception:
+                        dec = None
+                if isinstance(dec, dict) and "width" in dec and "height" in dec and "data" in dec:
+                    self._last_occ_grid = dec
+        except Exception:
+            pass
 
     # ----------------- Publish/visualize -----------------
     def _render_image(self, img_msg: Dict[str, Any]):
@@ -132,6 +217,52 @@ class Go2SensorsNode(BaseNode):
                 rr.log("/lidar/points", rr.Points3D(pts, colors=colors))
             else:
                 rr.log("/lidar/points", rr.Points3D(pts))
+
+            # Occupancy grid generation is handled by OccupancyGridNode.
+        except Exception:
+            pass
+
+    def _render_robot_box(self, pose_msg: Dict[str, Any]):
+        try:
+            pos = pose_msg.get("position") or {}
+            px = float(pos.get("x", 0.0))
+            py = float(pos.get("y", 0.0))
+            pz = float(pos.get("z", 0.0))
+
+            center = np.array([px, py, pz], dtype=np.float32)
+
+            # Optional orientation (quaternion w,x,y,z)
+            quat_xyzw = None
+            try:
+                ori = pose_msg.get("orientation") or {}
+                qw = float(ori.get("w"))
+                qx = float(ori.get("x"))
+                qy = float(ori.get("y"))
+                qz = float(ori.get("z"))
+                # Rerun expects quaternions in xyzw order
+                quat_xyzw = np.array([qx, qy, qz, qw], dtype=np.float32)
+            except Exception:
+                quat_xyzw = None
+
+            # Log a simple axis-aligned 3D box at the robot pose.
+            # Box dimensions: 0.70 x 0.31 x 0.40 m (half-sizes set in __init__).
+            if quat_xyzw is not None:
+                rr.log(
+                    "/robot/footprint",
+                    rr.Boxes3D(
+                        centers=np.expand_dims(center, axis=0),
+                        half_sizes=np.expand_dims(self._robot_half_sizes, axis=0),
+                        quaternions=np.expand_dims(quat_xyzw, axis=0),
+                    ),
+                )
+            else:
+                rr.log(
+                    "/robot/footprint",
+                    rr.Boxes3D(
+                        centers=np.expand_dims(center, axis=0),
+                        half_sizes=np.expand_dims(self._robot_half_sizes, axis=0),
+                    ),
+                )
         except Exception:
             pass
 
@@ -142,3 +273,35 @@ class Go2SensorsNode(BaseNode):
         if self._last_pc is not None:
             self._render_pointcloud(self._last_pc)
             self._last_pc = None
+        # Prefer pre-rendered occupancy image if available; fallback to grid-to-image conversion
+        if self._last_occ_img is not None:
+            try:
+                rr.log("/occupancy/grid", rr.Image(self._last_occ_img))
+            except Exception:
+                pass
+            finally:
+                self._last_occ_img = None
+        elif self._last_occ_grid is not None:
+            try:
+                g = self._last_occ_grid
+                w = int(g.get("width", 0))
+                h = int(g.get("height", 0))
+                data = g.get("data")
+                if w > 0 and h > 0 and isinstance(data, list) and len(data) >= w * h:
+                    arr = np.array(data[: w * h], dtype=np.int16).reshape((h, w))
+                    # Map values to colors: unknown(-1)=gray, free(0)=green, occupied(>=100)=red
+                    img = np.zeros((h, w, 3), dtype=np.uint8)
+                    unknown = arr < 0
+                    free = arr == 0
+                    occ = arr >= 100
+                    img[unknown] = (80, 80, 80)
+                    img[free] = (0, 255, 0)
+                    img[occ] = (255, 0, 0)
+                    rr.log("/occupancy/grid", rr.Image(img))
+            except Exception:
+                pass
+            finally:
+                self._last_occ_grid = None
+        if self._last_pose is not None:
+            self._render_robot_box(self._last_pose)
+            self._last_pose = None

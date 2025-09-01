@@ -10,7 +10,7 @@ nodes:
       axes:
         x: 0     # left stick horizontal
         y: 1     # left stick vertical
-        yaw: 3   # right stick horizontal
+        yaw: 2  # right stick horizontal
       invert:
         x: true    # right on stick -> negative vy (strafe right)
         y: true   # push forward -> positive forward
@@ -30,5 +30,15 @@ nodes:
       lidar_decoder: native   # 'native' returns Nx3 points
       rerun_spawn: true
       rerun_app_id: go2/cash
-
+  - type: nodes.occupancy_grid_node.OccupancyGridNode
+    params:
+      robot_id: cash
+      update_rate: 10.0
+      resolution: 0.1
+      width: 400
+      height: 400
+      min_z: 0.2
+      max_z: 1.4
+      free_z_max: 0.1
+      occ_min_points: 5
 scripts: []
