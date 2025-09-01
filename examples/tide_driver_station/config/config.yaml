@@ -7,6 +7,7 @@ nodes:
       robot_id: cash
       update_rate: 30.0
       deadzone: 0.12
+      twist_topic: cmd/twist/teleop
       axes:
         x: 0     # left stick horizontal
         y: 1     # left stick vertical
@@ -19,6 +20,10 @@ nodes:
         linear: 1.3   # m/s
         angular: 3.0  # rad/s
       # enable_button: 4   # optional: hold LB to enable movement
+      # Targeted navigation controls
+      target_mode_button: 2   # X button toggles targeting mode
+      send_goal_button: 0     # A button sends current target as goal
+      cancel_threshold: 0.25  # joystick override threshold to cancel active nav
   - type: nodes.go2_sensors_node.Go2SensorsNode
     params:
       robot_id: cash
@@ -41,4 +46,44 @@ nodes:
       max_z: 1.4
       free_z_max: 0.1
       occ_min_points: 5
+      # If your LiDAR points are in robot frame, set true to transform by pose
+      pc_in_robot_frame: false
+      # Allow clearing previously occupied with sufficient free evidence
+      clear_occupied: true
+      clear_free_min_points: 2
+  - type: nodes.navigation_node.NavigationNode
+    params:
+      robot_id: cash
+      update_rate: 5.0
+      heading_bins: 16
+      step_cells: 4
+      turn_bins: 2
+      robot_radius_m: 0.28
+      allow_unknown: false
+      # Encourage rotate-in-place then straight motion
+      allow_turn_in_place: true
+      cost_turn_in_place: 0.4
+      cost_turn_while_moving: 0.9
+  - type: nodes.path_follow_node.PathFollowNode
+    params:
+      robot_id: cash
+      update_rate: 20.0
+      twist_topic: cmd/twist/nav
+      k_dist: 0.8
+      k_yaw: 1.5
+      v_max: 0.5
+      w_max: 1.2
+      waypoint_lookahead: 2
+      waypoint_tol_m: 0.15
+      goal_dist_tol_m: 0.2
+      goal_yaw_tol_rad: 0.35
+  - type: nodes.twist_mux_node.TwistMuxNode
+    params:
+      robot_id: cash
+      update_rate: 30.0
+      teleop_epsilon: 0.02
+      input_timeout_s: 0.5
+      output_topic: cmd/twist
+      teleop_topic: cmd/twist/teleop
+      nav_topic: cmd/twist/nav
 scripts: []

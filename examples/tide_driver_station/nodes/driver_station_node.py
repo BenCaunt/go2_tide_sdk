@@ -4,6 +4,9 @@ DriverStationNode: Tide node using pygame for controller input.
 
 Publishes:
 - cmd/twist (Twist2D)
+- planning/target_pose2d (dict) when in targeting mode
+- cmd/nav/goal (dict) on send goal
+- cmd/nav/cancel (empty) on cancel
 
 Subscribes:
 - state/pose3d (Pose3D)
@@ -17,6 +20,9 @@ Configuration (YAML params for this node):
 - invert: { x: bool, y: bool, yaw: bool } (default: {x: False, y: True, yaw: False})
 - scales: { linear: float m/s, angular: float rad/s } (default: {linear:0.6, angular:1.2})
 - enable_button: Optional[int] (if set, must be held to move)
+- target_mode_button: Optional[int] (toggle targeting mode)
+- send_goal_button: Optional[int] (send goal when targeting)
+- cancel_threshold: float (abs axis beyond cancels path, default 0.25)
 """
 
 import os
@@ -44,6 +50,7 @@ class DriverStationNode(BaseNode):
         params = config or {}
         self.hz = float(params.get("update_rate", params.get("hz", 30.0)))
         self.deadzone = float(params.get("deadzone", 0.1))
+        self.twist_topic: str = str(params.get("twist_topic", "cmd/twist"))
         self.axes = {
             "x": int(params.get("axes", {}).get("x", 0)),
             "y": int(params.get("axes", {}).get("y", 1)),
@@ -59,6 +66,9 @@ class DriverStationNode(BaseNode):
         self.linear_scale = float(scl.get("linear", 0.6))
         self.angular_scale = float(scl.get("angular", 1.2))
         self.enable_button: Optional[int] = params.get("enable_button", None)
+        self.target_mode_button: Optional[int] = params.get("target_mode_button", None)
+        self.send_goal_button: Optional[int] = params.get("send_goal_button", None)
+        self.cancel_threshold: float = float(params.get("cancel_threshold", 0.25))
 
         # Visualization moved to sensors node to avoid duplicate Rerun init
 
@@ -66,6 +76,9 @@ class DriverStationNode(BaseNode):
         self._js_ready = False
         self._joystick: Optional["pygame.joystick.Joystick"] = None
         self._last_log = 0.0
+        self._target_mode = False
+        self._target_xyyaw: Optional[Dict[str, float]] = None
+        self._cancel_sent = False
 
         # Subscribe to relevant robot topics (Pose3D + Quaternion)
         # These will be prefixed with ROBOT_ID by BaseNode
@@ -133,9 +146,63 @@ class DriverStationNode(BaseNode):
                 ay = read_axis("y")
                 az = read_axis("yaw")
 
-                vx = ay * self.linear_scale
-                vy = ax * self.linear_scale
-                wz = az * self.angular_scale
+                # Targeting mode handling
+                # Toggle targeting mode
+                if self.target_mode_button is not None and self.target_mode_button < self._joystick.get_numbuttons():
+                    if bool(self._joystick.get_button(self.target_mode_button)):
+                        # Debounce: only toggle on new press; simple approach using cancel flag as edge guard
+                        if not self._target_mode:
+                            # Enter targeting mode; initialize target at current pose
+                            pose = self.take("state/pose3d") or {}
+                            pos = (pose.get("position") or {})
+                            ori = (pose.get("orientation") or {})
+                            yaw = 0.0
+                            try:
+                                qw = float(ori.get("w", 1.0)); qx = float(ori.get("x", 0.0)); qy = float(ori.get("y", 0.0)); qz = float(ori.get("z", 0.0))
+                                yaw = float(np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)))
+                            except Exception:
+                                yaw = 0.0
+                            self._target_xyyaw = {
+                                "x": float((pos.get("x", 0.0))),
+                                "y": float((pos.get("y", 0.0))),
+                                "yaw": float(yaw),
+                            }
+                            self._target_mode = True
+                else:
+                    # No button configured; ensure mode off
+                    self._target_mode = False
+
+                if self._target_mode:
+                    # While targeting, move target with sticks in world XY
+                    # Use a modest rate per step derived from linear_scale (m/s) scaled by loop dt ~ 1/hz
+                    rate = max(0.05, self.linear_scale / max(self.hz, 1.0))
+                    if self._target_xyyaw is None:
+                        self._target_xyyaw = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+                    self._target_xyyaw["x"] += float(ax * rate)
+                    self._target_xyyaw["y"] += float(ay * rate)
+                    self._target_xyyaw["yaw"] += float(az * 0.02)
+                    # Publish target for visualization
+                    self.put("planning/target_pose2d", {
+                        "x": float(self._target_xyyaw["x"]),
+                        "y": float(self._target_xyyaw["y"]),
+                        "yaw": float(self._target_xyyaw["yaw"]),
+                    })
+                    # Send goal if button pressed
+                    if self.send_goal_button is not None and self.send_goal_button < self._joystick.get_numbuttons():
+                        if bool(self._joystick.get_button(self.send_goal_button)):
+                            self.put("cmd/nav/goal", {
+                                "x": float(self._target_xyyaw["x"]),
+                                "y": float(self._target_xyyaw["y"]),
+                                "yaw": float(self._target_xyyaw["yaw"]),
+                            })
+                            self._target_mode = False
+                    # Do not drive robot while targeting
+                    vx = vy = wz = 0.0
+                else:
+                    # Teleop mode: map axes to robot cmd
+                    vx = ay * self.linear_scale
+                    vy = ax * self.linear_scale
+                    wz = az * self.angular_scale
 
                 # Deadman/enable button
                 if self.enable_button is not None:
@@ -148,13 +215,22 @@ class DriverStationNode(BaseNode):
                     if not btn_pressed:
                         vx = vy = wz = 0.0
 
+                # Cancel path if user moves joystick beyond threshold and not targeting
+                if not self._target_mode:
+                    moved = max(abs(ax), abs(ay), abs(az)) > self.cancel_threshold
+                    if moved and not self._cancel_sent:
+                        self.put("cmd/nav/cancel", {"reason": "joystick_override"})
+                        self._cancel_sent = True
+                    elif not moved:
+                        self._cancel_sent = False
+
             except Exception as e:
                 print(f"Joystick read error: {e}")
                 vx = vy = wz = 0.0
 
         # Publish cmd/twist
         twist = Twist2D(linear=Vector2(x=vx, y=vy), angular=wz)
-        self.put("cmd/twist", to_zenoh_value(twist))
+        self.put(self.twist_topic, to_zenoh_value(twist))
 
         # Fetch latest pose + quat for periodic console logging
         pose = self.take("state/pose3d")

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import numpy as np
 
@@ -60,6 +60,13 @@ class OccupancyGridNode(BaseNode):
         self.free_z_max: float = float(p.get("free_z_max", 0.1))
         self.occ_min_points: int = int(p.get("occ_min_points", 5))
         self.free_min_points: int = int(p.get("free_min_points", 1))
+        # Clearing policy
+        self.clear_occupied: bool = bool(p.get("clear_occupied", True))
+        self.clear_free_min_points: int = int(p.get("clear_free_min_points", max(1, self.free_min_points)))
+
+        # Point cloud frame: if True, interpret points in robot/base frame and transform by latest pose.
+        # If False (default), interpret points as already in world frame.
+        self.pc_in_robot_frame: bool = bool(p.get("pc_in_robot_frame", False))
 
         # Grid origin (world meters). Initialized on first pose; else defaults around (0,0)
         self.origin_x: Optional[float] = None
@@ -75,10 +82,13 @@ class OccupancyGridNode(BaseNode):
         # Latest inputs
         self._last_pc: Optional[Dict[str, Any]] = None
         self._last_pose: Optional[Dict[str, Any]] = None
+        self._last_path: Optional[List[Dict[str, float]]] = None
 
         # Subscribe to inputs
         self.subscribe("sensor/lidar/points3d", self._on_points)
         self.subscribe("state/pose3d", self._on_pose)
+        # Optional: subscribe to planned path for overlay in occupancy image
+        self.subscribe("planning/path", self._on_path)
 
     # -- Callbacks --
     def _on_points(self, msg: Dict[str, Any]):
@@ -99,6 +109,19 @@ class OccupancyGridNode(BaseNode):
                 self.origin_y = py - 0.5 * span_y
             except Exception:
                 pass
+
+    def _on_path(self, msg: Dict[str, Any]):
+        try:
+            poses = msg.get("poses") if isinstance(msg, dict) else None
+            if isinstance(poses, list) and len(poses) > 0:
+                self._last_path = [
+                    {"x": float(p.get("x", 0.0)), "y": float(p.get("y", 0.0))}
+                    for p in poses
+                ]
+            else:
+                self._last_path = None
+        except Exception:
+            self._last_path = None
 
     # -- Utilities --
     def _ensure_origin(self) -> Tuple[float, float]:
@@ -219,6 +242,50 @@ class OccupancyGridNode(BaseNode):
         except Exception:
             pass
 
+        # Optional: overlay planned path on the occupancy image (blue polyline)
+        try:
+            if self._last_path and len(self._last_path) > 1:
+                ox, oy = self._ensure_origin()
+                col = (0, 128, 255)  # BGR: light orange/blue-ish for contrast
+
+                def to_ixy(wx: float, wy: float) -> Optional[Tuple[int, int]]:
+                    if self.resolution <= 0:
+                        return None
+                    ix = int(np.round((wx - ox) / self.resolution))
+                    iy = int(np.round((wy - oy) / self.resolution))
+                    if 0 <= ix < self.width and 0 <= iy < self.height:
+                        return ix, iy
+                    return None
+
+                def draw_line(ix0: int, iy0: int, ix1: int, iy1: int) -> None:
+                    dx = abs(ix1 - ix0)
+                    dy = -abs(iy1 - iy0)
+                    sx = 1 if ix0 < ix1 else -1
+                    sy = 1 if iy0 < iy1 else -1
+                    err = dx + dy
+                    x, y = ix0, iy0
+                    while True:
+                        if 0 <= x < self.width and 0 <= y < self.height:
+                            img[y, x] = col
+                        if x == ix1 and y == iy1:
+                            break
+                        e2 = 2 * err
+                        if e2 >= dy:
+                            err += dy
+                            x += sx
+                        if e2 <= dx:
+                            err += dx
+                            y += sy
+
+                pts = [to_ixy(p["x"], p["y"]) for p in self._last_path]
+                prev = None
+                for pt in pts:
+                    if pt is not None and prev is not None:
+                        draw_line(prev[0], prev[1], pt[0], pt[1])
+                    prev = pt
+        except Exception:
+            pass
+
         payload = {
             "height": int(self.height),
             "width": int(self.width),
@@ -238,6 +305,33 @@ class OccupancyGridNode(BaseNode):
         pts = self._decode_points(pc_msg)
         if pts is None or pts.shape[0] == 0:
             return
+
+        # Optional: transform from robot/base frame to world using latest pose
+        if self.pc_in_robot_frame:
+            pose = self._last_pose
+            if not isinstance(pose, dict):
+                # Without a pose we cannot place the points into the world; skip this frame
+                return
+            try:
+                pos = pose.get("position") or {}
+                px = float(pos.get("x", 0.0))
+                py = float(pos.get("y", 0.0))
+                ori = pose.get("orientation") or {}
+                qw = float(ori.get("w", 1.0))
+                qx = float(ori.get("x", 0.0))
+                qy = float(ori.get("y", 0.0))
+                qz = float(ori.get("z", 0.0))
+                # yaw from quaternion
+                yaw = float(np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)))
+                c, s = float(np.cos(yaw)), float(np.sin(yaw))
+                # Rotate XY then translate
+                x_local = pts[:, 0]
+                y_local = pts[:, 1]
+                xw = c * x_local - s * y_local + px
+                yw = s * x_local + c * y_local + py
+                pts = np.stack([xw, yw, pts[:, 2]], axis=1)
+            except Exception:
+                return
 
         # Keep previous occupancy (cache). Only update cells observed in this frame.
         iy, ix, inside = self._points_to_indices(pts)
@@ -266,12 +360,16 @@ class OccupancyGridNode(BaseNode):
             self._grid[occ_cells] = 100
 
         # Update free cells where we saw ground points and not newly marked occupied
-        free_cells = (self._free_counts >= int(self.free_min_points)) & (~occ_cells)
+        free_cells = self._free_counts >= int(self.clear_free_min_points)
         if np.any(free_cells):
-            # Avoid clearing previously occupied unless contradicted over time; for now do not clear occupied
-            # Only set unknown or free to free=0
-            mask = free_cells & (self._grid < 100)
-            self._grid[mask] = 0
+            if self.clear_occupied:
+                # Clear regardless of previous value when we have sufficient free evidence and not newly occupied in this frame
+                mask = free_cells & (~occ_cells)
+                self._grid[mask] = 0
+            else:
+                # Only clear unknown/free cells
+                mask = free_cells & (~occ_cells) & (self._grid < 100)
+                self._grid[mask] = 0
 
         # Publish results this step
         self._publish_grid()

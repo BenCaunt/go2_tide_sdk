@@ -60,6 +60,11 @@ class Go2SensorsNode(BaseNode):
         self._last_occ_grid: Optional[Dict[str, Any]] = None
         self._last_occ_img: Optional[np.ndarray] = None  # RGB image if provided by producer
         self.subscribe("mapping/occupancy", self._on_occ_grid)
+        # Planning overlays
+        self._last_target: Optional[Dict[str, float]] = None
+        self._last_path: Optional[Dict[str, Any]] = None
+        self.subscribe("planning/target_pose2d", self._on_target)
+        self.subscribe("planning/path", self._on_path)
 
     def _on_image(self, msg: Dict[str, Any]):
         self._last_img = msg
@@ -133,6 +138,19 @@ class Go2SensorsNode(BaseNode):
                     self._last_occ_grid = dec
         except Exception:
             pass
+
+    def _on_target(self, msg: Dict[str, Any]):
+        try:
+            if isinstance(msg, dict) and "x" in msg and "y" in msg:
+                self._last_target = {"x": float(msg.get("x", 0.0)), "y": float(msg.get("y", 0.0))}
+        except Exception:
+            pass
+
+    def _on_path(self, msg: Dict[str, Any]):
+        try:
+            self._last_path = msg if isinstance(msg, dict) else None
+        except Exception:
+            self._last_path = None
 
     # ----------------- Publish/visualize -----------------
     def _render_image(self, img_msg: Dict[str, Any]):
@@ -305,3 +323,24 @@ class Go2SensorsNode(BaseNode):
         if self._last_pose is not None:
             self._render_robot_box(self._last_pose)
             self._last_pose = None
+        # Render target and path last
+        if self._last_target is not None:
+            try:
+                tx = float(self._last_target.get("x", 0.0))
+                ty = float(self._last_target.get("y", 0.0))
+                tz = 0.05
+                rr.log("/planning/target", rr.Points3D(np.array([[tx, ty, tz]], dtype=np.float32), radii=0.06, colors=np.array([[255, 200, 0]], dtype=np.uint8)))
+            except Exception:
+                pass
+            finally:
+                self._last_target = None
+        if self._last_path is not None:
+            try:
+                poses = self._last_path.get("poses") if isinstance(self._last_path, dict) else None
+                if isinstance(poses, list) and len(poses) > 1:
+                    pts = np.array([[float(p.get("x", 0.0)), float(p.get("y", 0.0)), 0.05] for p in poses], dtype=np.float32)
+                    rr.log("/planning/path", rr.LineStrips3D([pts], colors=np.array([[0, 128, 255]], dtype=np.uint8)))
+            except Exception:
+                pass
+            finally:
+                self._last_path = None

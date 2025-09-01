@@ -1,0 +1,7 @@
+- we have lidar data, odometry data, and occupancy grid generation for the unitree Go2
+- we want the ability to specify a pose and have the robot safely navigate to it 
+- we should use an extended SE(2) A* algorithm which uses 16 bins at 360/16 degrees apart for each state which we will check for collisions.  
+- The point of this is to allow the Go2 to navigate in tighter spaces than an inflation strategy might allow. 
+- We should use a simple 2x P controller (1 on distance 1 on heading) to navigate to the pose, almost as a differential drive robot.  I think this will be safer because the lidar is always in front.  If any pose on our path gets occupied as we move we should recompute the path using A*
+- the gamepad should allow us to specify a target position easily. One button will move into a "targeting mode" where the gamepad allows moving of the target position in both the 3d and 2d view.  then another button will allow sending the command.  The path should be shown both in the 2d and 3d view.  Any joystick movement greater than 0.25 should cancel the trajectory and return to teleop.  
+- please use safe, maintainable DRY code. 
