@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import heapq
 import math
 import numpy as np
+import time
 
 from tide.core.node import BaseNode
 
@@ -55,6 +56,8 @@ class NavigationNode(BaseNode):
         self.allow_turn_in_place: bool = bool(p.get("allow_turn_in_place", True))
         self.cost_turn_in_place: float = float(p.get("cost_turn_in_place", 0.4))
         self.cost_turn_while_moving: float = float(p.get("cost_turn_while_moving", 0.8))
+        # Replan hysteresis
+        self.min_replan_period_s: float = float(p.get("min_replan_period_s", 0.3))
 
         # Inputs
         self._grid_msg: Optional[Dict[str, Any]] = None
@@ -66,6 +69,7 @@ class NavigationNode(BaseNode):
         # Cache for replanning trigger
         self._last_grid_version: int = 0
         self._grid_version: int = 0
+        self._t_last_plan: float = 0.0
 
         self.subscribe("mapping/occupancy", self._on_grid)
         self.subscribe("state/pose3d", self._on_pose)
@@ -315,15 +319,21 @@ class NavigationNode(BaseNode):
                     need_replan = True
                     break
 
-        if need_replan:
+        now = time.time()
+        if need_replan and (self._path_world is None or (now - self._t_last_plan) >= self.min_replan_period_s):
             start_xyyaw = start
-            goal_xyyaw = (float(goal["x"]), float(goal["y"]), float(goal.get("yaw", 0.0)))
+            goal_yaw_val = float(goal.get("yaw", 0.0))
+            goal_xyyaw = (float(goal["x"]), float(goal["y"]), goal_yaw_val)
             path = self._plan(start_xyyaw, goal_xyyaw)
             self._last_grid_version = self._grid_version
             self._path_world = path
+            self._t_last_plan = now
             # Publish path (or empty if None)
             poses = []
             if path is not None:
                 for (x, y, yaw) in path:
                     poses.append({"x": float(x), "y": float(y), "yaw": float(yaw)})
+                # Ensure final pose yaw matches requested goal yaw to aid final alignment
+                if len(poses) > 0:
+                    poses[-1]["yaw"] = float(goal_yaw_val)
             self.put("planning/path", {"poses": poses, "frame": "map"})

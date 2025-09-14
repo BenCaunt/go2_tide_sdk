@@ -42,15 +42,15 @@ nodes:
       resolution: 0.1
       width: 400
       height: 400
-      min_z: 0.2
+      min_z: 0.10
       max_z: 1.4
       free_z_max: 0.1
-      occ_min_points: 5
+      occ_min_points: 4
       # If your LiDAR points are in robot frame, set true to transform by pose
       pc_in_robot_frame: false
       # Allow clearing previously occupied with sufficient free evidence
       clear_occupied: true
-      clear_free_min_points: 2
+      clear_free_min_points: 5
   - type: nodes.navigation_node.NavigationNode
     params:
       robot_id: cash
