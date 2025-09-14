@@ -56,6 +56,9 @@ class Go2SensorsNode(BaseNode):
         self.points_topic = str(p.get("points_topic", "sensor/lidar/points3d"))
         self.subscribe(self.points_topic, self._on_points)
         self.subscribe("state/pose3d", self._on_pose)
+        # Optional correction from LidarCacheNode
+        self._pose_corr = {"dx": 0.0, "dy": 0.0, "dyaw": 0.0}
+        self.subscribe("mapping/pose_correction", self._on_pose_correction)
         # Optional occupancy image from separate node
         self.subscribe("mapping/occupancy/image", self._on_occ_image)
         # Standardized occupancy grid (Tide OccupancyGrid2D) and optional pre-rendered image
@@ -68,6 +71,14 @@ class Go2SensorsNode(BaseNode):
         self.subscribe("planning/target_pose2d", self._on_target)
         self.subscribe("planning/path", self._on_path)
 
+        # Occupancy -> 3D obstacle overlay on the voxel/point view
+        # Draw vertical boxes where 2D grid marks occupied, to indicate obstacles in 3D.
+        self.occ_overlay_enabled: bool = bool(p.get("occ_overlay_enabled", True))
+        self.occ_overlay_z_min: float = float(p.get("occ_overlay_z_min", 0.0))
+        self.occ_overlay_z_max: float = float(p.get("occ_overlay_z_max", 1.0))
+        self.occ_overlay_threshold: int = int(p.get("occ_overlay_threshold", 100))
+        self.occ_overlay_max_boxes: int = int(p.get("occ_overlay_max_boxes", 3000))
+
     def _on_image(self, msg: Dict[str, Any]):
         self._last_img = msg
 
@@ -75,8 +86,51 @@ class Go2SensorsNode(BaseNode):
         self._last_pc = msg
 
     def _on_pose(self, msg: Dict[str, Any]):
-        self._last_pose = msg
-        self._pose_cache = msg
+        # Apply optional correction on read for rendering alignment
+        try:
+            dx = float(self._pose_corr.get("dx", 0.0))
+            dy = float(self._pose_corr.get("dy", 0.0))
+            dyaw = float(self._pose_corr.get("dyaw", 0.0))
+            # Clone dict to avoid mutating shared
+            pose = dict(msg)
+            pos = dict(pose.get("position") or {})
+            ori = dict(pose.get("orientation") or {})
+            px = float(pos.get("x", 0.0)) + dx
+            py = float(pos.get("y", 0.0)) + dy
+            pz = float(pos.get("z", 0.0))
+            # Adjust yaw only; keep roll/pitch
+            qw = float(ori.get("w", 1.0))
+            qx = float(ori.get("x", 0.0))
+            qy = float(ori.get("y", 0.0))
+            qz = float(ori.get("z", 0.0))
+            yaw = float(np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)))
+            yaw += dyaw
+            cy, sy = float(np.cos(yaw)), float(np.sin(yaw))
+            # Reconstruct quaternion with new yaw and zero roll/pitch deltas
+            # Keep roll/pitch from original approximately by rotating only around Z
+            # For simplicity, create yaw-only quaternion and multiply
+            q_yaw = np.array([0.0, 0.0, np.sin(yaw / 2.0), np.cos(yaw / 2.0)], dtype=np.float32)  # x,y,z,w
+            # Fallback: just set orientation to yaw-only
+            pose["position"] = {"x": px, "y": py, "z": pz}
+            pose["orientation"] = {"w": float(q_yaw[3]), "x": float(q_yaw[0]), "y": float(q_yaw[1]), "z": float(q_yaw[2])}
+            self._last_pose = pose
+            self._pose_cache = pose
+        except Exception:
+            self._last_pose = msg
+            self._pose_cache = msg
+
+    def _on_pose_correction(self, msg: Any):
+        try:
+            if isinstance(msg, (bytes, bytearray)):
+                import json as _json
+
+                self._pose_corr = _json.loads(msg)
+            elif isinstance(msg, str):
+                self._pose_corr = json.loads(msg)
+            elif isinstance(msg, dict):
+                self._pose_corr = msg
+        except Exception:
+            pass
 
     def _on_occ_image(self, msg: Any):
         # Cache a pre-rendered occupancy image; log later in step to avoid competing draws
@@ -310,6 +364,39 @@ class Go2SensorsNode(BaseNode):
         if self._last_occ_img is not None:
             try:
                 rr.log("/occupancy/grid", rr.Image(self._last_occ_img))
+                # If we also have the structured grid, overlay 3D obstacle boxes
+                if self.occ_overlay_enabled and isinstance(self._last_occ_grid, dict):
+                    try:
+                        g = self._last_occ_grid
+                        w = int(g.get("width", 0))
+                        h = int(g.get("height", 0))
+                        data = g.get("data")
+                        if w > 0 and h > 0 and isinstance(data, list) and len(data) >= w * h:
+                            arr = np.array(data[: w * h], dtype=np.int16).reshape((h, w))
+                            res = float(g.get("resolution", 0.1))
+                            ox = float(g.get("origin_x", 0.0))
+                            oy = float(g.get("origin_y", 0.0))
+                            occ_mask = arr >= int(self.occ_overlay_threshold)
+                            ys, xs = np.where(occ_mask)
+                            n = int(xs.shape[0])
+                            if n > 0:
+                                if n > self.occ_overlay_max_boxes and self.occ_overlay_max_boxes > 0:
+                                    stride = int(np.ceil(n / float(self.occ_overlay_max_boxes)))
+                                    xs = xs[::stride]
+                                    ys = ys[::stride]
+                                    n = xs.shape[0]
+                                cx = ox + (xs.astype(np.float32) + 0.5) * res
+                                cy = oy + (ys.astype(np.float32) + 0.5) * res
+                                z0 = float(self.occ_overlay_z_min)
+                                z1 = float(self.occ_overlay_z_max)
+                                cz = (z0 + z1) * 0.5
+                                hz = max(1e-3, (z1 - z0) * 0.5)
+                                centers = np.stack([cx, cy, np.full_like(cx, cz)], axis=1).astype(np.float32)
+                                half_sizes = np.tile(np.array([res * 0.5, res * 0.5, hz], dtype=np.float32), (n, 1))
+                                colors = np.tile(np.array([255, 0, 0], dtype=np.uint8), (n, 1))
+                                rr.log("/occupancy/obstacles3d", rr.Boxes3D(centers=centers, half_sizes=half_sizes, colors=colors))
+                    except Exception:
+                        pass
             except Exception:
                 pass
             finally:
@@ -331,6 +418,35 @@ class Go2SensorsNode(BaseNode):
                     img[free] = (0, 255, 0)
                     img[occ] = (255, 0, 0)
                     rr.log("/occupancy/grid", rr.Image(img))
+
+                    # Also overlay 3D obstacles as vertical boxes at occupied cells
+                    if self.occ_overlay_enabled:
+                        try:
+                            res = float(g.get("resolution", 0.1))
+                            ox = float(g.get("origin_x", 0.0))
+                            oy = float(g.get("origin_y", 0.0))
+                            occ_mask = arr >= int(self.occ_overlay_threshold)
+                            ys, xs = np.where(occ_mask)
+                            n = int(xs.shape[0])
+                            if n > 0:
+                                # Optionally downsample to avoid overdraw
+                                if n > self.occ_overlay_max_boxes and self.occ_overlay_max_boxes > 0:
+                                    stride = int(np.ceil(n / float(self.occ_overlay_max_boxes)))
+                                    xs = xs[::stride]
+                                    ys = ys[::stride]
+                                    n = xs.shape[0]
+                                cx = ox + (xs.astype(np.float32) + 0.5) * res
+                                cy = oy + (ys.astype(np.float32) + 0.5) * res
+                                z0 = float(self.occ_overlay_z_min)
+                                z1 = float(self.occ_overlay_z_max)
+                                cz = (z0 + z1) * 0.5
+                                hz = max(1e-3, (z1 - z0) * 0.5)
+                                centers = np.stack([cx, cy, np.full_like(cx, cz)], axis=1).astype(np.float32)
+                                half_sizes = np.tile(np.array([res * 0.5, res * 0.5, hz], dtype=np.float32), (n, 1))
+                                colors = np.tile(np.array([255, 0, 0], dtype=np.uint8), (n, 1))
+                                rr.log("/occupancy/obstacles3d", rr.Boxes3D(centers=centers, half_sizes=half_sizes, colors=colors))
+                        except Exception:
+                            pass
             except Exception:
                 pass
             finally:

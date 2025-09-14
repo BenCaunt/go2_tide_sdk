@@ -86,11 +86,13 @@ class OccupancyGridNode(BaseNode):
         self._last_pc: Optional[Dict[str, Any]] = None
         self._last_pose: Optional[Dict[str, Any]] = None
         self._last_path: Optional[List[Dict[str, float]]] = None
+        self._pose_corr = {"dx": 0.0, "dy": 0.0, "dyaw": 0.0}
 
         # Subscribe to inputs
         self.points_topic: str = str(p.get("points_topic", "sensor/lidar/points3d"))
         self.subscribe(self.points_topic, self._on_points)
         self.subscribe("state/pose3d", self._on_pose)
+        self.subscribe("mapping/pose_correction", self._on_pose_correction)
         # Optional: subscribe to planned path for overlay in occupancy image
         self.subscribe("planning/path", self._on_path)
 
@@ -99,7 +101,29 @@ class OccupancyGridNode(BaseNode):
         self._last_pc = msg
 
     def _on_pose(self, msg: Dict[str, Any]):
-        self._last_pose = msg
+        # Apply correction so raycasting originates from aligned pose
+        try:
+            dx = float(self._pose_corr.get("dx", 0.0))
+            dy = float(self._pose_corr.get("dy", 0.0))
+            dyaw = float(self._pose_corr.get("dyaw", 0.0))
+            pose = dict(msg)
+            pos = dict(pose.get("position") or {})
+            ori = dict(pose.get("orientation") or {})
+            px = float(pos.get("x", 0.0)) + dx
+            py = float(pos.get("y", 0.0)) + dy
+            pz = float(pos.get("z", 0.0))
+            qw = float(ori.get("w", 1.0))
+            qx = float(ori.get("x", 0.0))
+            qy = float(ori.get("y", 0.0))
+            qz = float(ori.get("z", 0.0))
+            yaw = float(np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)))
+            yaw += dyaw
+            q_yaw = np.array([0.0, 0.0, np.sin(yaw / 2.0), np.cos(yaw / 2.0)], dtype=np.float32)
+            pose["position"] = {"x": px, "y": py, "z": pz}
+            pose["orientation"] = {"w": float(q_yaw[3]), "x": float(q_yaw[0]), "y": float(q_yaw[1]), "z": float(q_yaw[2])}
+            self._last_pose = pose
+        except Exception:
+            self._last_pose = msg
 
         # Initialize origin on first pose to keep robot centered
         if self.origin_x is None or self.origin_y is None:
@@ -126,6 +150,21 @@ class OccupancyGridNode(BaseNode):
                 self._last_path = None
         except Exception:
             self._last_path = None
+
+    def _on_pose_correction(self, msg: Any):
+        try:
+            if isinstance(msg, (bytes, bytearray)):
+                import json as _json
+
+                self._pose_corr = _json.loads(msg)
+            elif isinstance(msg, str):
+                import json as _json
+
+                self._pose_corr = _json.loads(msg)
+            elif isinstance(msg, dict):
+                self._pose_corr = msg
+        except Exception:
+            pass
 
     # -- Utilities --
     def _ensure_origin(self) -> Tuple[float, float]:

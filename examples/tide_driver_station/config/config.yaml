@@ -47,6 +47,8 @@ nodes:
       voxel_size_m: 0.10
       max_voxels: 200000
       fresh_ttl_s: 2.0
+      # Visual tweak: keep 20% saturation for cached points
+      cached_saturation: 0.2
   - type: nodes.occupancy_grid_node.OccupancyGridNode
     params:
       robot_id: cash
@@ -61,13 +63,13 @@ nodes:
       free_z_max: 0.1
       # Carve free space via raycasting
       raycast_free: true
-      raycast_stride: 3
-      occ_min_points: 4
+      raycast_stride: 1
+      occ_min_points: 1
       # If your LiDAR points are in robot frame, set true to transform by pose
       pc_in_robot_frame: false
       # Allow clearing previously occupied with sufficient free evidence
       clear_occupied: true
-      clear_free_min_points: 5
+      clear_free_min_points: 1
   - type: nodes.navigation_node.NavigationNode
     params:
       robot_id: cash
