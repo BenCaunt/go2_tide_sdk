@@ -63,6 +63,9 @@ class OccupancyGridNode(BaseNode):
         # Clearing policy
         self.clear_occupied: bool = bool(p.get("clear_occupied", True))
         self.clear_free_min_points: int = int(p.get("clear_free_min_points", max(1, self.free_min_points)))
+        # Free-space carving via raycasting from robot pose to each point
+        self.raycast_free: bool = bool(p.get("raycast_free", True))
+        self.raycast_stride: int = max(1, int(p.get("raycast_stride", 3)))
 
         # Point cloud frame: if True, interpret points in robot/base frame and transform by latest pose.
         # If False (default), interpret points as already in world frame.
@@ -85,7 +88,8 @@ class OccupancyGridNode(BaseNode):
         self._last_path: Optional[List[Dict[str, float]]] = None
 
         # Subscribe to inputs
-        self.subscribe("sensor/lidar/points3d", self._on_points)
+        self.points_topic: str = str(p.get("points_topic", "sensor/lidar/points3d"))
+        self.subscribe(self.points_topic, self._on_points)
         self.subscribe("state/pose3d", self._on_pose)
         # Optional: subscribe to planned path for overlay in occupancy image
         self.subscribe("planning/path", self._on_path)
@@ -138,9 +142,22 @@ class OccupancyGridNode(BaseNode):
         try:
             count = int(pc_msg.get("count", 0))
             xyz = pc_msg.get("xyz")
-            if count > 0 and isinstance(xyz, (bytes, bytearray)):
-                pts = np.frombuffer(xyz, dtype=np.float32).reshape((-1, 3))
-                return pts
+            if count > 0:
+                if isinstance(xyz, (bytes, bytearray)):
+                    pts = np.frombuffer(xyz, dtype=np.float32).reshape((-1, 3))
+                    return pts
+                # JSON fallback with base64
+                if pc_msg.get("format") == "json_b64":
+                    try:
+                        import base64
+
+                        b64 = pc_msg.get("xyz_b64")
+                        if isinstance(b64, str):
+                            raw = base64.b64decode(b64)
+                            pts = np.frombuffer(raw, dtype=np.float32).reshape((-1, 3))
+                            return pts
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -296,6 +313,29 @@ class OccupancyGridNode(BaseNode):
         # Publish as JSON string for compatibility
         self.put("mapping/occupancy/image", json.dumps(payload))
 
+    def _raycast_free(self, ix0: int, iy0: int, ix1: int, iy1: int) -> None:
+        """Mark free cells along the line from (ix0,iy0) to (ix1,iy1), excluding the endpoint."""
+        dx = abs(ix1 - ix0)
+        dy = -abs(iy1 - iy0)
+        sx = 1 if ix0 < ix1 else -1
+        sy = 1 if iy0 < iy1 else -1
+        err = dx + dy
+        x, y = ix0, iy0
+        while True:
+            if x == ix1 and y == iy1:
+                break
+            if 0 <= x < self.width and 0 <= y < self.height:
+                # Clear to free; if clear_occupied is false, keep occupied cells
+                if self.clear_occupied or self._grid[y, x] < 100:
+                    self._grid[y, x] = 0
+            e2 = 2 * err
+            if e2 >= dy:
+                err += dy
+                x += sx
+            if e2 <= dx:
+                err += dx
+                y += sy
+
     # -- Main loop --
     def step(self) -> None:
         pc_msg = self._last_pc
@@ -354,12 +394,31 @@ class OccupancyGridNode(BaseNode):
         self._accumulate_counts(iy, ix, obs_mask, self._obs_counts)
         self._accumulate_counts(iy, ix, free_mask, self._free_counts)
 
-        # Update occupied cells: meeting occ_min_points in this frame
+        # Update occupied cells (z within obstacle band) with per-cell count threshold
         occ_cells = self._obs_counts >= int(self.occ_min_points)
+
+        # Free-space carving by raycasting from robot to each endpoint
+        if self.raycast_free and isinstance(self._last_pose, dict):
+            try:
+                pos = self._last_pose.get("position") or {}
+                px = float(pos.get("x", 0.0))
+                py = float(pos.get("y", 0.0))
+                ox, oy = self._ensure_origin()
+                ix0 = int(np.round((px - ox) / self.resolution))
+                iy0 = int(np.round((py - oy) / self.resolution))
+                # Downsample endpoints to reduce workload
+                for j in range(0, ix.shape[0], self.raycast_stride):
+                    x1 = int(ix[j])
+                    y1 = int(iy[j])
+                    self._raycast_free(ix0, iy0, x1, y1)
+            except Exception:
+                pass
+
+        # Apply occupied markings after carving free so endpoints win
         if np.any(occ_cells):
             self._grid[occ_cells] = 100
 
-        # Update free cells where we saw ground points and not newly marked occupied
+        # Additionally, update free cells where we saw ground points and not newly marked occupied
         free_cells = self._free_counts >= int(self.clear_free_min_points)
         if np.any(free_cells):
             if self.clear_occupied:

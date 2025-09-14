@@ -52,7 +52,9 @@ class Go2SensorsNode(BaseNode):
         rr.log("world", rr.ViewCoordinates.RDF)
         # Subscribe to topics from go2_tide_bridge
         self.subscribe("sensor/camera/front/image", self._on_image)
-        self.subscribe("sensor/lidar/points3d", self._on_points)
+        # Allow overriding points topic to use cached/full map if available
+        self.points_topic = str(p.get("points_topic", "sensor/lidar/points3d"))
+        self.subscribe(self.points_topic, self._on_points)
         self.subscribe("state/pose3d", self._on_pose)
         # Optional occupancy image from separate node
         self.subscribe("mapping/occupancy/image", self._on_occ_image)
@@ -171,6 +173,13 @@ class Go2SensorsNode(BaseNode):
         try:
             count = int(pc_msg.get("count", 0))
             xyz = pc_msg.get("xyz")
+            # Support JSON fallback with base64 fields
+            if not isinstance(xyz, (bytes, bytearray)) and pc_msg.get("format") == "json_b64":
+                import base64
+
+                b64 = pc_msg.get("xyz_b64")
+                if isinstance(b64, str):
+                    xyz = base64.b64decode(b64)
             if count <= 0 or not isinstance(xyz, (bytes, bytearray)):
                 return
             pts = np.frombuffer(xyz, dtype=np.float32).reshape((-1, 3))
@@ -179,6 +188,12 @@ class Go2SensorsNode(BaseNode):
 
             # Try to use provided RGB if available and mode allows
             rgb_bytes = pc_msg.get("rgb")
+            if not isinstance(rgb_bytes, (bytes, bytearray)) and pc_msg.get("format") == "json_b64":
+                import base64
+
+                b64r = pc_msg.get("rgb_b64")
+                if isinstance(b64r, str):
+                    rgb_bytes = base64.b64decode(b64r)
             if (
                 self.pc_color_mode in ("auto", "rgb")
                 and isinstance(rgb_bytes, (bytes, bytearray))

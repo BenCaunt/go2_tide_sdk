@@ -28,6 +28,7 @@ nodes:
     params:
       robot_id: cash
       update_rate: 20.0
+      pc_color_mode: auto
       connection_method: LocalSTA
       ip: 192.168.1.190   # or set serial
       enable_camera: true
@@ -35,16 +36,32 @@ nodes:
       lidar_decoder: native   # 'native' returns Nx3 points
       rerun_spawn: true
       rerun_app_id: go2/cash
+      # Prefer the cached point cloud (published by LidarCacheNode)
+      points_topic: sensor/lidar/points3d_cached
+  - type: nodes.lidar_cache_node.LidarCacheNode
+    params:
+      robot_id: cash
+      update_rate: 20.0
+      input_topic: sensor/lidar/points3d
+      output_topic: sensor/lidar/points3d_cached
+      voxel_size_m: 0.10
+      max_voxels: 200000
+      fresh_ttl_s: 2.0
   - type: nodes.occupancy_grid_node.OccupancyGridNode
     params:
       robot_id: cash
       update_rate: 10.0
+      # Use cached point cloud for stable mapping
+      points_topic: sensor/lidar/points3d_cached
       resolution: 0.1
       width: 400
       height: 400
       min_z: 0.10
       max_z: 1.4
       free_z_max: 0.1
+      # Carve free space via raycasting
+      raycast_free: true
+      raycast_stride: 3
       occ_min_points: 4
       # If your LiDAR points are in robot frame, set true to transform by pose
       pc_in_robot_frame: false

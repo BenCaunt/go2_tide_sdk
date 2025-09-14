@@ -8,6 +8,19 @@ Overview
 - Rerun-based viewer with LiDAR, occupancy, target, and path overlays
   - Occupancy 2D image also overlays robot pose and planned path
 
+Persistent LiDAR Cache
+- The raw Go2 LiDAR stream is distance-windowed and drops older points as the robot moves.
+- `LidarCacheNode` subscribes to `sensor/lidar/points3d`, accumulates points in a voxel cache, and publishes a combined cloud on `sensor/lidar/points3d_cached` with per-point RGB:
+  - Fresh points (recently updated within TTL): white
+  - Cached points (persisted voxels): grey
+- `Go2SensorsNode` can render either raw or cached by setting `points_topic` (defaults to raw). The default config uses the cached topic for better scene persistence in Rerun.
+
+LidarCacheNode parameters:
+- `input_topic` / `output_topic`: defaults `sensor/lidar/points3d` -> `sensor/lidar/points3d_cached`
+- `voxel_size_m`: voxelization size in meters (default 0.10)
+- `max_voxels`: max cached voxels before pruning oldest (default 200000)
+- `fresh_ttl_s`: seconds a voxel remains “fresh/white” after update (default 0.5)
+
 Occupancy/Point Cloud Alignment
 - Incoming LiDAR points are assumed to be in a consistent world frame by default.
 - If your bridge publishes points in the robot/base frame, enable `pc_in_robot_frame: true` in the Occupancy node so points are transformed by the latest pose before integration.

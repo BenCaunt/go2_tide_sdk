@@ -29,6 +29,16 @@ There are video (recvonly) and audio (sendrecv) channels in WebRTC that you can 
 
 There is a lidar decoder built in, so you can handle decoded PoinClouds directly. Check out the examples in the `/example` folder.
 
+### Persistent LiDAR cache (tide_driver_station)
+
+The Go2’s LiDAR stream is distance-windowed and drops older points as the robot moves. To maintain a persistent global map without using robot memory, `examples/tide_driver_station/nodes/lidar_cache_node.py` subscribes to `sensor/lidar/points3d`, accumulates points in a voxel cache, and republishes a combined cloud on `sensor/lidar/points3d_cached`:
+
+- Fresh points: white; cached points: grey.
+- Rerun renders the cached topic by default via `Go2SensorsNode`.
+
+Tune cache via `examples/tide_driver_station/config/config.yaml` under `LidarCacheNode`:
+- `voxel_size_m` (default 0.10), `max_voxels` (default 200000), `fresh_ttl_s` (default 0.5).
+
 ## Connection Methods
 
 The driver supports three types of connection methods:
