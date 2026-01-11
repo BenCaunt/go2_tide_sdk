@@ -168,6 +168,27 @@ class NavigationNode(BaseNode):
                 return True
         return False
 
+    def _find_nearest_free_cell(self, ix: int, iy: int, max_radius: int = 10) -> Optional[Tuple[int, int]]:
+        """Find the nearest collision-free cell to (ix, iy) using spiral search."""
+        arr = self._grid_arr
+        if arr is None:
+            return None
+        h, w = arr.shape
+        # Check the original cell first
+        if not self._collision_at(ix, iy):
+            return (ix, iy)
+        # Spiral outward
+        for r in range(1, max_radius + 1):
+            for dx in range(-r, r + 1):
+                for dy in range(-r, r + 1):
+                    if abs(dx) != r and abs(dy) != r:
+                        continue  # Only check perimeter of current radius
+                    nx, ny = ix + dx, iy + dy
+                    if 0 <= nx < w and 0 <= ny < h:
+                        if not self._collision_at(nx, ny):
+                            return (nx, ny)
+        return None
+
     # ---- Planning ----
     def _plan(self, start_xyyaw: Tuple[float, float, float], goal_xyyaw: Tuple[float, float, float]) -> Optional[List[Tuple[float, float, float]]]:
         if self._grid_arr is None or self._grid_msg is None:
@@ -186,8 +207,14 @@ class NavigationNode(BaseNode):
             return None
         if gix < 0 or giy < 0 or gix >= w or giy >= h:
             return None
-        if self._collision_at(six, siy) or self._collision_at(gix, giy):
+        if self._collision_at(six, siy):
             return None
+        # Goal relaxation: if goal is in collision, find nearest free cell
+        if self._collision_at(gix, giy):
+            relaxed = self._find_nearest_free_cell(gix, giy, max_radius=10)
+            if relaxed is None:
+                return None
+            gix, giy = relaxed
 
         def yaw_to_bin(yaw: float) -> int:
             y = (yaw + 2 * math.pi) % (2 * math.pi)
@@ -305,19 +332,27 @@ class NavigationNode(BaseNode):
         if goal is None or start is None or self._grid_arr is None:
             return
 
-        # Replan if no path or grid updated or path invalidated
+        # Replan only if no path or current path becomes invalid (collision detected)
         need_replan = False
         if self._path_world is None:
             need_replan = True
-        elif self._last_grid_version != self._grid_version:
-            need_replan = True
         else:
-            # Check remaining waypoints for collision
+            # Check remaining waypoints for collision against current grid
             for (wx, wy, _wyaw) in self._path_world:
                 ix, iy = self._world_to_grid(wx, wy)
                 if self._collision_at(ix, iy):
                     need_replan = True
                     break
+            # Also check segments between consecutive waypoints
+            if not need_replan:
+                for i in range(len(self._path_world) - 1):
+                    wx0, wy0, _ = self._path_world[i]
+                    wx1, wy1, _ = self._path_world[i + 1]
+                    ix0, iy0 = self._world_to_grid(wx0, wy0)
+                    ix1, iy1 = self._world_to_grid(wx1, wy1)
+                    if self._line_collision(ix0, iy0, ix1, iy1):
+                        need_replan = True
+                        break
 
         now = time.time()
         if need_replan and (self._path_world is None or (now - self._t_last_plan) >= self.min_replan_period_s):
@@ -326,14 +361,14 @@ class NavigationNode(BaseNode):
             goal_xyyaw = (float(goal["x"]), float(goal["y"]), goal_yaw_val)
             path = self._plan(start_xyyaw, goal_xyyaw)
             self._last_grid_version = self._grid_version
-            self._path_world = path
             self._t_last_plan = now
-            # Publish path (or empty if None)
-            poses = []
+            # Only update path if planning succeeded; keep old path if replanning fails
             if path is not None:
+                self._path_world = path
+                poses = []
                 for (x, y, yaw) in path:
                     poses.append({"x": float(x), "y": float(y), "yaw": float(yaw)})
                 # Ensure final pose yaw matches requested goal yaw to aid final alignment
                 if len(poses) > 0:
                     poses[-1]["yaw"] = float(goal_yaw_val)
-            self.put("planning/path", {"poses": poses, "frame": "map"})
+                self.put("planning/path", {"poses": poses, "frame": "map"})

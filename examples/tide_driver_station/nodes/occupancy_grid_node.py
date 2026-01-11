@@ -15,6 +15,12 @@ Rules:
 - Maintain a persistent cache; cells not observed in a given frame keep
   their previous values and do not "decay" to unknown.
 
+False Positive Filtering:
+- Temporal persistence: require a cell to be observed in N out of M recent
+  frames before marking occupied (temporal_persistence_frames, temporal_window_frames).
+- Spatial density: remove isolated occupied cells with fewer than min_neighbors
+  occupied neighbors (spatial_filter_enable, spatial_min_neighbors).
+
 Notes:
 - Assumes incoming point cloud is already in a consistent/global frame.
 - Origin is initialized on first received pose to center robot in the grid.
@@ -67,6 +73,14 @@ class OccupancyGridNode(BaseNode):
         self.raycast_free: bool = bool(p.get("raycast_free", True))
         self.raycast_stride: int = max(1, int(p.get("raycast_stride", 3)))
 
+        # Temporal persistence filter: require N observations in last M frames
+        self.temporal_persistence_frames: int = int(p.get("temporal_persistence_frames", 3))
+        self.temporal_window_frames: int = int(p.get("temporal_window_frames", 5))
+
+        # Spatial density filter: remove isolated occupied cells
+        self.spatial_filter_enable: bool = bool(p.get("spatial_filter_enable", True))
+        self.spatial_min_neighbors: int = int(p.get("spatial_min_neighbors", 2))
+
         # Point cloud frame: if True, interpret points in robot/base frame and transform by latest pose.
         # If False (default), interpret points as already in world frame.
         self.pc_in_robot_frame: bool = bool(p.get("pc_in_robot_frame", False))
@@ -81,6 +95,10 @@ class OccupancyGridNode(BaseNode):
         # Scratch buffers reused across frames
         self._obs_counts: np.ndarray = np.zeros((self.height, self.width), dtype=np.int16)
         self._free_counts: np.ndarray = np.zeros((self.height, self.width), dtype=np.int16)
+
+        # Temporal persistence: ring buffer of observation masks (each is height x width bool)
+        self._obs_history: List[np.ndarray] = []
+        self._history_idx: int = 0
 
         # Latest inputs
         self._last_pc: Optional[Dict[str, Any]] = None
@@ -352,6 +370,61 @@ class OccupancyGridNode(BaseNode):
         # Publish as JSON string for compatibility
         self.put("mapping/occupancy/image", json.dumps(payload))
 
+    def _update_temporal_history(self, obs_mask: np.ndarray) -> None:
+        """Update the ring buffer with current frame's observation mask."""
+        window = self.temporal_window_frames
+        if window <= 0:
+            return
+
+        if len(self._obs_history) < window:
+            # Still filling the buffer
+            self._obs_history.append(obs_mask.copy())
+        else:
+            # Overwrite oldest entry
+            self._obs_history[self._history_idx] = obs_mask.copy()
+            self._history_idx = (self._history_idx + 1) % window
+
+    def _apply_temporal_filter(self, occ_cells: np.ndarray) -> np.ndarray:
+        """Filter occupied cells by temporal persistence: require N observations in last M frames."""
+        threshold = self.temporal_persistence_frames
+        window = self.temporal_window_frames
+
+        if threshold <= 1 or window <= 1 or len(self._obs_history) == 0:
+            return occ_cells
+
+        # Sum observations across history
+        obs_sum = np.zeros((self.height, self.width), dtype=np.int16)
+        for hist in self._obs_history:
+            obs_sum += hist.astype(np.int16)
+
+        # Only keep cells that were observed in >= threshold frames AND are currently marked occupied
+        persistent = obs_sum >= threshold
+        return occ_cells & persistent
+
+    def _apply_spatial_filter(self, occ_cells: np.ndarray) -> np.ndarray:
+        """Remove isolated occupied cells that have fewer than min_neighbors occupied neighbors."""
+        if not self.spatial_filter_enable or self.spatial_min_neighbors <= 0:
+            return occ_cells
+
+        min_neighbors = self.spatial_min_neighbors
+
+        # Count occupied neighbors using convolution-like approach
+        # Pad the array to handle edges
+        padded = np.pad(occ_cells.astype(np.int16), 1, mode='constant', constant_values=0)
+
+        # Sum 8-connected neighbors (exclude center)
+        neighbor_count = (
+            padded[:-2, :-2] + padded[:-2, 1:-1] + padded[:-2, 2:] +
+            padded[1:-1, :-2] +                    padded[1:-1, 2:] +
+            padded[2:, :-2] + padded[2:, 1:-1] + padded[2:, 2:]
+        )
+
+        # Keep cells that have enough neighbors OR are not occupied
+        has_enough_neighbors = neighbor_count >= min_neighbors
+        filtered = occ_cells & has_enough_neighbors
+
+        return filtered
+
     def _raycast_free(self, ix0: int, iy0: int, ix1: int, iy1: int) -> None:
         """Mark free cells along the line from (ix0,iy0) to (ix1,iy1), excluding the endpoint."""
         dx = abs(ix1 - ix0)
@@ -435,6 +508,15 @@ class OccupancyGridNode(BaseNode):
 
         # Update occupied cells (z within obstacle band) with per-cell count threshold
         occ_cells = self._obs_counts >= int(self.occ_min_points)
+
+        # Update temporal history with current frame's observation mask
+        self._update_temporal_history(occ_cells)
+
+        # Apply temporal persistence filter: require N observations in last M frames
+        occ_cells = self._apply_temporal_filter(occ_cells)
+
+        # Apply spatial density filter: remove isolated occupied cells
+        occ_cells = self._apply_spatial_filter(occ_cells)
 
         # Free-space carving by raycasting from robot to each endpoint
         if self.raycast_free and isinstance(self._last_pose, dict):

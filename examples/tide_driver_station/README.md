@@ -31,6 +31,12 @@ Twist Mux
 - `TwistMuxNode` selects between them and publishes the final `cmd/twist`.
 - Policy: teleop wins only when its magnitude exceeds a small epsilon; otherwise nav passes through. Stale inputs are ignored.
 
+Dataset Logging
+- `DatasetLoggerNode` subscribes to `state/pose3d`, `sensor/camera/front/image`, and `cmd/twist`.
+- Each run writes `samples.jsonl` plus per-frame images under `logs/datasets/<robot_id>_<timestamp>/`.
+- Configure `output_root`, `image_format` (`npy`, `jpg`, `png`), and `max_age_s` in `config/config.yaml`.
+- If `output_root` includes spaces, wrap it in quotes (e.g., `"/Volumes/Extreme SSD/go2_data"`).
+
 Run
 1) Configure your robot ID and network in `config/config.yaml`.
 2) Ensure the Go2 bridge provides `state/pose3d`, `sensor/lidar/points3d`, and optionally `sensor/imu/quat`.

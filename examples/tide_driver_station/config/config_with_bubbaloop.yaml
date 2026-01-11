@@ -48,17 +48,6 @@ nodes:
       rerun_app_id: go2/cash
       points_topic: sensor/lidar/points3d_cached
 
-  - type: nodes.dataset_logger_node.DatasetLoggerNode
-    params:
-      robot_id: cash
-      update_rate: 10.0
-      image_topic: sensor/camera/front/image
-      pose_topic: state/pose3d
-      twist_topic: cmd/twist
-      output_root: "/Volumes/Extreme SSD/go2_data"
-      image_format: npy
-      max_age_s: 0.5
-
   # Bubbaloop Bridge - streams camera to browser dashboard
   - type: nodes.bubbaloop_bridge_node.BubballoopBridgeNode
     params:

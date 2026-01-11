@@ -10,9 +10,19 @@ import numpy as np
 import json
 import base64
 import math
+import sys
+import os
 
 from tide.core.node import BaseNode
 import rerun as rr
+
+# Add parent directory to path for camera_lidar_fusion import
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from camera_lidar_fusion import CameraLidarFusion, create_fusion
+    FUSION_AVAILABLE = True
+except ImportError:
+    FUSION_AVAILABLE = False
 
 
 class Go2SensorsNode(BaseNode):
@@ -42,8 +52,17 @@ class Go2SensorsNode(BaseNode):
         # Point cloud coloring
         # Modes: 'auto' (use RGB if provided, else fallback),
         #        'height' (by z), 'distance' (by Euclidean distance),
-        #        'rgb' (only use provided RGB), 'none' (no colors)
+        #        'rgb' (only use provided RGB), 'camera' (project camera onto points),
+        #        'none' (no colors)
         self.pc_color_mode = str(p.get("pc_color_mode", "height")).lower()
+
+        # Camera-lidar fusion for 'camera' color mode and secondary camera-colored view
+        self._fusion: Optional[CameraLidarFusion] = None
+        if FUSION_AVAILABLE:
+            self._fusion = create_fusion(640, 480, 120.0)
+
+        # Cache decoded RGB image for camera coloring
+        self._last_img_rgb: Optional[np.ndarray] = None
 
         # Occupancy is handled by a separate node; this viewer only logs its output.
 
@@ -220,6 +239,8 @@ class Go2SensorsNode(BaseNode):
             img = np.frombuffer(data, dtype=np.uint8).reshape((h, w, 3))
             rgb = img[:, :, ::-1] if enc == "bgr8" else img
             rr.log("/camera/front", rr.Image(rgb))
+            # Cache RGB for camera coloring mode
+            self._last_img_rgb = rgb.copy()
         except Exception:
             pass
 
@@ -254,6 +275,20 @@ class Go2SensorsNode(BaseNode):
                 and len(rgb_bytes) >= count * 3
             ):
                 colors = np.frombuffer(rgb_bytes, dtype=np.uint8).reshape((-1, 3))
+
+            # Camera mode: project camera image onto point cloud
+            if colors is None and self.pc_color_mode == "camera" and self._fusion is not None:
+                if self._last_img_rgb is not None:
+                    try:
+                        # Use fusion to colorize points with camera image
+                        # Points are assumed to be in base frame (from lidar cache)
+                        colors = self._fusion.colorize_pointcloud(pts, self._last_img_rgb)
+                        # Points outside camera FOV get a default gray color
+                        no_color = np.all(colors == 0, axis=1)
+                        colors[no_color] = [80, 80, 80]  # Gray for non-visible points
+                    except Exception as e:
+                        print(f"Camera coloring error: {e}")
+                        colors = None
 
             # If no colors yet, compute by height or distance depending on mode
             if colors is None and self.pc_color_mode in ("auto", "height", "distance"):
@@ -304,6 +339,19 @@ class Go2SensorsNode(BaseNode):
                 rr.log("/lidar/points", rr.Points3D(pts, colors=colors))
             else:
                 rr.log("/lidar/points", rr.Points3D(pts))
+
+            # Also log camera-colored version if fusion is available (even when not primary mode)
+            if self._fusion is not None and self._last_img_rgb is not None and self.pc_color_mode != "camera":
+                try:
+                    cam_colors = self._fusion.colorize_pointcloud(pts, self._last_img_rgb)
+                    # Only log if we got meaningful colors (some points visible in camera)
+                    has_color = np.any(cam_colors > 0)
+                    if has_color:
+                        no_color = np.all(cam_colors == 0, axis=1)
+                        cam_colors[no_color] = [60, 60, 60]  # Dark gray for non-visible
+                        rr.log("/lidar/points_camera", rr.Points3D(pts, colors=cam_colors))
+                except Exception:
+                    pass
 
             # Occupancy grid generation is handled by OccupancyGridNode.
         except Exception:
