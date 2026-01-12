@@ -36,6 +36,12 @@ Dataset Logging
 - Each run writes `samples.jsonl` plus per-frame images under `logs/datasets/<robot_id>_<timestamp>/`.
 - Configure `output_root`, `image_format` (`npy`, `jpg`, `png`), and `max_age_s` in `config/config.yaml`.
 - If `output_root` includes spaces, wrap it in quotes (e.g., `"/Volumes/Extreme SSD/go2_data"`).
+- Inspect logs with `python examples/tide_driver_station/dataset_reader.py /path/to/run`.
+- Trim inactive sections with `python examples/tide_driver_station/dataset_trim.py /path/to/run`.
+
+Rerun Playback
+- Set `rerun_save_path` (or `rerun_save_dir`) under `Go2SensorsNode` to save a `.rrd` recording on shutdown.
+- Replay with `rerun path/to/recording.rrd` and use the timeline controls to scrub.
 
 Run
 1) Configure your robot ID and network in `config/config.yaml`.

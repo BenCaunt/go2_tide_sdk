@@ -12,6 +12,7 @@ import base64
 import math
 import sys
 import os
+import time
 
 from tide.core.node import BaseNode
 import rerun as rr
@@ -38,6 +39,19 @@ class Go2SensorsNode(BaseNode):
         # Rerun
         self.rerun_spawn = bool(p.get("rerun_spawn", True))
         self.rerun_app_id = p.get("rerun_app_id", f"go2/{self.ROBOT_ID}")
+        self.rerun_save_path: Optional[str] = None
+        rerun_save_path = p.get("rerun_save_path")
+        rerun_save_dir = p.get("rerun_save_dir")
+        if rerun_save_path:
+            self.rerun_save_path = os.path.expanduser(os.path.expandvars(str(rerun_save_path)))
+        elif rerun_save_dir:
+            rerun_save_dir = os.path.expanduser(os.path.expandvars(str(rerun_save_dir)))
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            self.rerun_save_path = os.path.join(rerun_save_dir, f"{self.ROBOT_ID}_{stamp}.rrd")
+        if self.rerun_save_path:
+            save_dir = os.path.dirname(self.rerun_save_path)
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
 
         # Latest received messages
         self._last_img: Optional[Dict[str, Any]] = None
@@ -523,3 +537,11 @@ class Go2SensorsNode(BaseNode):
                 pass
             finally:
                 self._last_path = None
+
+    def cleanup(self) -> None:
+        if self.rerun_save_path:
+            try:
+                rr.save(self.rerun_save_path)
+                print(f"Rerun recording saved to {self.rerun_save_path}")
+            except Exception as exc:
+                print(f"Rerun save failed: {exc}")
